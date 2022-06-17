@@ -1,0 +1,844 @@
+/**
+* @NApiVersion 2.x
+* @NScriptType restlet
+* @author Vasile Sebastian
+*/
+define(['N/search', 'N/task', 'N/record', 'N/email', 'N/format', 'N/file', 'N/runtime', 'N/format', 'N/encode', 'N/config', 'N/https', 'N/log'],
+    function(Nsearch, Ntask, Nrecord, Nemail, Nformat, Nfile, Nruntime, Nformat, Nencode, Nconfig, Nhttps, log) {
+        var ITEMSfinal = [];
+        var ITEMSstart = [];
+        var ITEMSsort = {};
+        var ITEMSmain = {};
+        var finalObject = {};
+        var accounts = {};
+        var finalResult = [];
+        var consolidatedExcRates = {};
+        var currencies = [];
+        var monthIndex = { "0":"Jan", "1":"Feb", "2":"Mar", "3":"Apr", "4":"May", "5":"Jun",
+        "6":"Jul", "7":"Aug", "8":"Sep", "9":"Oct", "10":"Nov", "11":"Dec" };
+        var customers = {}, customerids = [];
+        var xlsFile;
+        var dateformat;
+        function _post(context){
+            //var filterAccounts = ['8465', '785', '2631', '2867', '4386', '4417', '4434', '5716', '6551', '6581', '7546', '7916'];
+            var filterAccounts = [];
+
+            dateformat = Nconfig.load({type: Nconfig.Type.USER_PREFERENCES}).getValue({fieldId: 'DATEFORMAT'});
+
+            var searchAccounts = Nsearch.create({
+                type: Nsearch.Type.ACCOUNT,
+                filters: [{
+                    name: 'isinactive',
+                    operator: Nsearch.Operator.IS,
+                    values: false
+                }],
+                columns: [
+                    {name: 'internalid'},
+                    {name: 'custrecord_osf_jp_salesreporttype'}
+                ]
+            }).run();
+            var start = 0;
+            var resultSet = searchAccounts.getRange(start, start + 1000);
+            while(resultSet.length){
+                resultSet.forEach(function(result) {
+                    var salestype = result.getText('custrecord_osf_jp_salesreporttype');
+                    if(salestype){
+                        //log.error('test', salestype);
+                        if(!accounts[salestype]){
+                            accounts[salestype] = [];
+                        }
+                        accounts[salestype].push(result.getValue('internalid'));
+                    }
+                    return true;
+                });
+                start += 1000;
+                var resultSet = searchAccounts.getRange(start, start + 1000);
+            }
+
+            if(accounts['Advance Invoices']) filterAccounts = filterAccounts.concat(accounts['Advance Invoices']);
+
+            var filterExpression = [
+                ['trandate', Nsearch.Operator.WITHIN, Nformat.format({value: new Date(context.startdate), type: Nformat.Type.DATE}), Nformat.format({value: new Date(context.enddate), type: Nformat.Type.DATE})],
+                'AND',
+                ['custbody_osf_amm_removefromcustomrep', Nsearch.Operator.IS, 'F'],
+                'AND',
+                    ['account', Nsearch.Operator.ANYOF, filterAccounts],
+                    // 'OR',
+                    // [
+                    //     ['mainline', Nsearch.Operator.IS, 'T'],
+                    //     'AND',
+                    //     ['type', Nsearch.Operator.ANYOF, 'CustInvc', 'CustCred']
+                    // ]
+            ];
+
+            filterExpression.push('AND');
+            filterExpression.push(['type', Nsearch.Operator.ANYOF, 'CustInvc', 'CustCred', 'Journal', 'CustDep', 'FxReval']);
+
+            if(context.subsidiary != 'all'){
+                filterExpression.push('AND');
+                filterExpression.push(['subsidiary', Nsearch.Operator.IS, context.subsidiary]);
+            }
+
+            var search = Nsearch.create({
+                type: Nsearch.Type.TRANSACTION,
+                columns: [
+                    {name: 'internalid'},
+                    {name: 'name'},
+                    {name: 'type'},
+                    {name: 'mainline'},
+                    {name: 'trandate'},
+                    {name: 'subsidiary'},
+                    {name: 'transactionlinetype'},
+                    {name: 'internalid', join: 'customermain'},
+                    {name: 'customer', join: 'job'},
+                    {name: 'entityid', join: 'job'},
+                    {name: 'internalid', join: 'job'},
+                    {name: 'custentity_osf_jp_sow', join: 'job'},
+                    {name: 'tranid'},
+                    {name: 'custentity_osf_jp_industry', join: 'job'},
+                    {name: 'custentity_osf_jp_technology', join: 'job'},
+                    {name: 'custentity_osf_jp_division', join: 'job'},
+                    {name: 'custentity_osf_jp_salestype', join: 'job'},
+                    {name: 'fxamount'},
+                    {name: 'debitamount'},
+                    {name: 'creditamount'},
+                    {name: 'currency'},
+                    {name: 'currency', join: 'subsidiary'},
+                    {name: 'exchangerate'},
+                    {name: 'country', join: 'billingaddress'},
+                    {name: 'internalid', join: 'account'},
+                    {name: 'name', join: 'account'},
+                    {name: 'description', join: 'account'},
+                    {name: 'type', join: 'account'},
+                    {name: 'salesrep'},
+                    {name: 'custentity_osf_jp_first_invoice_date', join: 'job'},
+                    {name: 'custentity_osf_jp_project_divisions', join: 'job'},
+                    {name: 'otherrefnum'},
+                    {name: 'memo'},
+                    {name: 'custentity_osf_jp_jira_project_key', join: 'job'},
+                    {name: 'custentity_osf_jp_jira_fix_version', join: 'job'},
+                    {name: 'custentity_osf_jp_maintenance_project', join: 'job'},
+                    {name: 'custentity_osf_jp_netsuite_project_type', join: 'job'},
+                    {name: 'custentity_osf_jp_salesforce_key', join: 'job'},
+                    {name: 'custcol_osf_inputtype'},
+                    {name: 'custbody_osf_deferredrevenue'},
+                ]
+            });
+            search.filterExpression = filterExpression;
+            search = search.run();
+            var tranIds = [];
+            var start = 0;
+            var resultSet = search.getRange(start, start + 1000);
+            while(resultSet.length){
+                resultSet.forEach(function(result) {
+                    if(tranIds.indexOf(result.getValue({name: 'internalid'})) == -1){
+                        tranIds.push(result.getValue({name: 'internalid'}));
+                    }
+                    var currency = result.getText({name: 'currency', join: 'subsidiary'}),
+                    projcustomer = result.getValue({name: 'customer', join: 'job'}),
+                    maincustomer = result.getValue({name: 'internalid', join: 'customermain'});
+                    if(currencies.indexOf(currency) == -1){
+                        currencies.push(currency);
+                    }
+                    if(projcustomer && customerids.indexOf(projcustomer) == -1){
+                        customerids.push(projcustomer);
+                    }else if(maincustomer && customerids.indexOf(maincustomer) == -1){
+                        customerids.push(maincustomer);
+                    }
+                    
+                    ITEMSstart.push(result);
+                    return true;
+                });
+                start += 1000;
+                resultSet = search.getRange(start, start + 1000);
+            }
+
+            filterExpression = [
+                ['trandate', Nsearch.Operator.WITHIN, Nformat.format({value: new Date(context.startdate), type: Nformat.Type.DATE}), Nformat.format({value: new Date(context.enddate), type: Nformat.Type.DATE})],
+                'AND',
+                [
+                    // ['account', Nsearch.Operator.ANYOF, filterAccounts],
+                    // 'OR',
+                    [
+                        ['mainline', Nsearch.Operator.IS, 'T'],
+                        'AND',
+                        ['type', Nsearch.Operator.ANYOF, 'CustInvc', 'CustCred']
+                    ]
+                ],
+                'AND',
+                ['internalid', Nsearch.Operator.ANYOF, tranIds]
+            ];
+
+            search = Nsearch.create({
+                type: Nsearch.Type.TRANSACTION,
+                columns: [
+                    {name: 'internalid'},
+                    {name: 'name'},
+                    {name: 'type'},
+                    {name: 'mainline'},
+                    {name: 'tranid'},
+                    {name: 'memo'},
+                ]
+            });
+            search.filterExpression = filterExpression;
+            if(tranIds.length){
+                search = search.run();
+    
+                search.each(function(element){
+                    ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})] = element;
+                    return true;
+                });
+            }
+
+            getCustomers();
+            getConsolidatedExchangeRates(context);
+            sortItems(context);
+            createFinalObject();
+            saveToExcel(context);
+            saveToJSON(context);
+
+            return xlsFile.url;
+        }
+
+        function createFinalObject(){
+            ITEMSfinal.forEach(function(element){
+                var subsidiary = element.getText({name: 'subsidiary'}).split(':').slice(-1)[0].trim();
+                var netsuiteid = element.getValue({name: 'entityid', join: 'job'}) ? element.getValue({name: 'entityid', join: 'job'}).split(':') : '- Unassigned -';
+                if(netsuiteid != '- Unassigned -'){
+                    netsuiteid = netsuiteid[netsuiteid.length - 1].trim();
+                }
+                if(element.getValue({name: 'type'}) == 'FxReval' && element.getValue({name: 'internalid'}) == '737740'){
+                    netsuiteid = 'RO-OSF-IFB-Verifone - SFCC Cartridge build MVP Phase1 SOW#005'
+                }
+                if(!finalObject[subsidiary]){
+                    finalObject[subsidiary] = {};
+                }
+                if(!finalObject[subsidiary][netsuiteid]){
+                    finalObject[subsidiary][netsuiteid] = [];
+                }
+                finalObject[subsidiary][netsuiteid].push(element);
+            });
+        }
+
+        function saveToJSON(context){
+            var objToSave = {
+                context: context,
+                result: finalResult
+            }, fileContent, file;
+
+            try{
+                //load the commissions file
+                file = Nfile.load({
+                    id: 'SuiteScripts/DeferredRevenueReport/DeferredRevenueResult.json'
+                });
+                fileContent = JSON.parse(file.getContents());
+                var keys = Object.keys(fileContent);
+                keys.sort();
+                for(var i = 0; i < keys.length - 3; i++){
+                    delete fileContent[keys[i]];
+                    try{
+                        var excelfile = Nfile.load({
+                            id: 'SuiteScripts/DeferredRevenueReport/DeferredRevenue' + keys[i] + '.xls'
+                        });
+
+                        Nfile.delete({
+                            id: excelfile.id
+                        })
+                    }catch(e){
+
+                    }
+                }
+            }catch(e){
+                fileContent = {};
+            }
+
+            fileContent[context.dateTime] = objToSave;
+
+            file = Nfile.create({
+                name: 'DeferredRevenueResult.json',
+                contents: JSON.stringify(fileContent),
+                fileType: Nfile.Type.JSON,
+                folder: 134376
+            });
+
+            file.save();
+        }
+
+        function getCustomers(){
+            if(!customerids.length){
+                return;
+            }
+            var searchCustomers = Nsearch.create({
+                type: Nsearch.Type.CUSTOMER,
+                filters: [{
+                    name: 'internalid',
+                    operator: Nsearch.Operator.ANYOF,
+                    values: customerids
+                }],
+                columns: [
+                    {name: 'internalid'},
+                    {name: 'entityid'},
+                    {name: 'country'},
+                    {name: 'subsidiary'},
+                    {name: 'custentity_osf_jp_the_coast'},
+                    {name: 'custentity_osf_jp_region'},
+                    {name: 'custentity_osf_jp_customer_date'},
+                ]
+            }).run();
+
+            searchCustomers.each(function(element){
+                customers[element.getValue({name: 'internalid'})] = element;
+                return true;
+            });
+        }
+
+        function getConsolidatedExchangeRates(context){
+
+            var response = Nhttps.get({
+                url: 'https://osf-operations-reporting.azurewebsites.net/api/NetsuiteRequestLayerHttpTrigger?code=zypUjSy03Q0ShahahINTALsVQa/qlK1J8gfSaVJi6QmVrqYI1QEPow==&script=745&deploy=1&startdate=' + context.startdate.replace(/\//g, '-') + '&enddate=' + context.enddate.replace(/\//g, '-') + '&rate=currentrate',
+                headers : {
+                    'Content-Type': 'application/json',
+                }
+            });
+            if(response.code == 200){
+                consolidatedExcRates = JSON.parse(JSON.parse(response.body));
+            }else{
+                var search = Nsearch.load({
+                    id: 'customsearch_osf_pcc_cons_exc_rates',
+                });
+                var searchstartdate = context.startdate.split('/');
+                searchstartdate[1] = '1';
+                search.filters[search.filters.length] = Nsearch.createFilter({
+                    name: 'periodstartdate',
+                    operator: Nsearch.Operator.WITHIN,
+                    values: [Nformat.format({value: new Date(searchstartdate.join('/')), type: Nformat.Type.DATE}), Nformat.format({value: new Date(context.enddate), type: Nformat.Type.DATE})]
+                });
+                // search.filters[search.filters.length] = Nsearch.createFilter({
+                //     name: 'fromcurrency',
+                //     operator: Nsearch.Operator.ANYOF,
+                //     values: currencies
+                // });
+                // search.filters[search.filters.length] = Nsearch.createFilter({
+                //     name: 'tocurrency',
+                //     operator: Nsearch.Operator.ANYOF,
+                //     values: ['US Dollar', 'Canadian Dollar']
+                // });
+                var resultSet = search.run();
+                resultSet.each(function(searchResult) {
+                    //if(currencies.indexOf(searchResult.getValue('fromcurrency')) != -1 && ['Canadian Dollar', 'US Dollar'].indexOf(searchResult.getValue('tocurrency')) != -1){
+                        var periodname = searchResult.getValue('periodname');
+                        if(!consolidatedExcRates[periodname]){
+                            consolidatedExcRates[periodname] = {};
+                        }
+                        consolidatedExcRates[periodname][searchResult.getValue('fromcurrency') + ' - ' + searchResult.getValue('tocurrency')] = searchResult.getValue('currentrate');
+                    //}
+                    //log.error('da', searchResult);
+                    return true;
+                });
+            }
+        }
+
+        function sortItems(context){
+            // ITEMSstart.forEach(function(element){
+            //     if(!ITEMSsort[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})]){
+            //         ITEMSsort[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})] = {};
+            //     }
+            //     if(element.getValue({name: 'mainline'}) == '*' && element.getValue({name: 'type'}) != 'Journal'){
+            //         ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})] = element;
+            //         return;
+            //     }
+            //     var accountKey = element.getValue({name: 'name', join: 'account'}) + '_' + element.getValue({name: 'entityid', join: 'job'});
+            //     if((element.getValue({name: 'subsidiary'}) == 16 || element.getValue({name: 'subsidiary'}) == 15) && element.getValue({name: 'type'}) != 'Journal'){
+            //         accountKey = 'BrazilTaxes';
+            //     }
+            //     if(!ITEMSsort[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})][accountKey]){
+            //         ITEMSsort[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})][accountKey] = [];
+            //     }
+            //     ITEMSsort[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})][accountKey].push(element);
+            // });
+
+
+            var nr = 1;
+            ITEMSstart.forEach(function(element){
+                var itemkey = element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'});
+                if(element.getValue({name: 'type'}) == 'Journal'){
+                    itemkey = itemkey + nr;
+                }
+                if(!ITEMSsort[itemkey]){
+                    ITEMSsort[itemkey] = {};
+                }
+                if(element.getValue({name: 'mainline'}) == '*' && element.getValue({name: 'type'}) != 'Journal'){
+                    ITEMSmain[itemkey] = element;
+                    return;
+                }
+                var accountKey = element.getValue({name: 'name', join: 'account'}) + '_' + element.getValue({name: 'entityid', join: 'job'});
+                if((element.getValue({name: 'subsidiary'}) == 15 || element.getValue({name: 'subsidiary'}) == 16 || element.getValue({name: 'subsidiary'}) == 30) && element.getValue({name: 'type'}) != 'Journal'){
+                    accountKey = 'BrazilTaxes';
+                }
+                if(!ITEMSsort[itemkey][accountKey]){
+                    ITEMSsort[itemkey][accountKey] = [];
+                }
+                ITEMSsort[itemkey][accountKey].push(element);
+                nr++;
+            });
+
+            for (var key in ITEMSsort) {
+                for(var subkey in ITEMSsort[key]){
+                    var amount = 0,
+                    firstItem = null;
+                    ITEMSsort[key][subkey].forEach(function(element, index){
+                        //log.error('test', element);
+                        if(!firstItem){
+                            firstItem = element;
+                        }
+
+                        var accountType = element.getText({name: 'type', join: 'account'}),
+                        accountName = element.getValue({name: 'name', join: 'account'});
+                        tempamount = element.getValue({name: 'fxamount'}),
+                        trandate = new Date(context.enddate);
+
+                        var periodname = monthIndex[trandate.getMonth()] + ' ' + trandate.getFullYear(),
+                        USDRate = 1;
+
+                        if(element.getValue({name: 'type'}) == 'FxReval'){
+                            log.error('fxreval', element);
+                            if(consolidatedExcRates[periodname]){
+                                USDRate = consolidatedExcRates[periodname][element.getText({name: 'currency', join: 'subsidiary'}) + ' - ' + 'US Dollar'];
+                                //log.error('USDRate', USDRate);
+                                if(element.getValue({name: 'debitamount'})){
+                                    tempamount = -element.getValue({name: 'debitamount'}) / USDRate;
+                                }else if(element.getValue({name: 'creditamount'})){
+                                    tempamount = element.getValue({name: 'creditamount'}) / USDRate;
+                                }
+                            }
+                        }
+
+                        if(element.getValue({name: 'subsidiary'}) == 15 || element.getValue({name: 'subsidiary'}) == 16 || element.getValue({name: 'subsidiary'}) == 30){
+                            if(accountType == 'Other Current Asset'){
+                                tempamount = -tempamount;
+                            }
+                        }
+
+                        amount += parseFloat(tempamount);
+                    });
+
+                    if(firstItem.getValue({name: 'internalid', join: 'account'}) == 10939){
+                        amount = -amount;
+                    }
+                    
+                    if(amount != 0){
+                        var subsidiaryamount = amount;
+                        if(firstItem.getText('currency') != firstItem.getText({name: 'currency', join: 'subsidiary'})){
+                            subsidiaryamount = subsidiaryamount * firstItem.getValue('exchangerate');
+                        }
+                        firstItem.actualAmount = amount.toFixed(2);
+
+                        // var startdatesplit = firstItem.getValue('trandate').split('/');
+                        // if(startdatesplit.length == 1){
+                        //     startdatesplit = startdatesplit[0].split('-')
+                        // }
+                        var trandate = new Date(context.enddate);
+                        // dateformat = dateformat.toLowerCase().replace(/fm/g, '');
+                        // if(dateformat.charAt(0) == 'd' && startdatesplit.length == 3){
+                        //     trandate = new Date(startdatesplit[2], parseInt(startdatesplit[1]) - 1, startdatesplit[0]);
+                        // }else{
+                        //     trandate = new Date(firstItem.getValue('trandate'));
+                        // }
+
+                        var periodname = monthIndex[trandate.getMonth()] + ' ' + trandate.getFullYear(),
+                        CADRate,
+                        USDRate;
+                        if(consolidatedExcRates[periodname]){
+                            CADRate = consolidatedExcRates[periodname][firstItem.getText({name: 'currency', join: 'subsidiary'}) + ' - ' + 'Canadian Dollar'],
+                            USDRate = consolidatedExcRates[periodname][firstItem.getText({name: 'currency', join: 'subsidiary'}) + ' - ' + 'US Dollar'];
+                        }
+                        
+                        if(!CADRate){
+                            CADRate = 1;
+                        }
+
+                        if(!USDRate){
+                            USDRate = 1;
+                        }
+
+                        firstItem.consolidatedUSDAmount = (USDRate * subsidiaryamount).toFixed(2);
+                        firstItem.consolidatedCADAmount = (CADRate * subsidiaryamount).toFixed(2);
+                        firstItem.subsidiaryamount = subsidiaryamount.toFixed(2);
+                        firstItem.USDRate = USDRate;
+                        firstItem.CADRate = CADRate;
+
+                        ITEMSfinal.push(firstItem);
+                    }
+                }
+            }
+        }
+
+        function formatExcelDate(startingdate){
+            if(!startingdate) return '<Cell><Data ss:Type="String"></Data></Cell>';
+            var startdatesplit = startingdate.split('/');
+            if(startdatesplit.length == 1){
+                startdatesplit = startdatesplit[0].split('-')
+            }
+            var trandate;
+            dateformat = dateformat.toLowerCase().replace(/fm/g, '');
+            if(dateformat.charAt(0) == 'd' && startdatesplit.length == 3){
+                trandate = new Date(startdatesplit[2], parseInt(startdatesplit[1]) - 1, startdatesplit[0]);
+            }else{
+                trandate = new Date(startingdate);
+            }
+            return '<Cell ss:StyleID="sDate"><Data ss:Type="DateTime">' + trandate.getFullYear() + '-' + (String(trandate.getMonth() + 1).length == 1 ? '0' + (trandate.getMonth() + 1): trandate.getMonth() + 1)  + '-' + (String(trandate.getDate()).length == 1 ? '0' + trandate.getDate(): trandate.getDate()) + 'T00:00:00.000</Data></Cell>';
+        }
+
+        function saveToExcel(context){
+            var totalUSD = 0,
+            totalCAD = 0,
+            totalSubs = 0;
+
+            var xmlString = '<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>';
+            xmlString += '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:html="http://www.w3.org/TR/REC-html40">';
+            //styles
+            xmlString += '<Styles><Style ss:ID="sNumberBold"><NumberFormat ss:Format="Standard"/><Font ss:Bold="1" /></Style><Style ss:ID="sBold"><Font ss:Bold="1" /></Style><Style ss:ID="sItalicBold"><Font ss:Bold="1" ss:Italic="1" /></Style><Style ss:ID="sred"><Interior ss:Color="#ff0000" ss:Pattern="Solid"  /></Style><Style ss:ID="syellow"><Interior ss:Color="#ffff00" ss:Pattern="Solid"  /></Style><Style ss:ID="sgreen"><Interior ss:Color="#008000" ss:Pattern="Solid"  /></Style><Style ss:ID="sDate"> <NumberFormat ss:Format="dd/mm/yyyy;@"/> </Style><Style ss:ID="sNumber"><NumberFormat ss:Format="Standard"/></Style></Styles>';
+            
+            xmlString += '<Worksheet ss:Name="Sheet1"><Table>';
+
+            xmlString += '<Row ss:StyleID="sBold">' +
+            '<Cell><Data ss:Type="String">Deferred Revenue Report</Data></Cell>' +
+            '</Row>';
+
+            xmlString += '<Row ss:StyleID="sBold">' +
+            '<Cell><Data ss:Type="String">As of:</Data></Cell>' +
+            '<Cell><Data ss:Type="String">' + context.enddate + '</Data></Cell>' +
+            '</Row>';
+            xmlString += '<Row ss:StyleID="sBold">' +
+            '<Cell><Data ss:Type="String"></Data></Cell>' +
+            '</Row>';
+
+            xmlString += '<Row ss:StyleID="sBold">' +
+            '<Cell><Data ss:Type="String">Project ID</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Subsidiary</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Project Internal ID</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Customer</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Document Type</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Document Number</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Date</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Memo</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Input Type</Data></Cell>' +
+            '<Cell><Data ss:Type="String">SOW</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Salesforce Key</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Jira Project Key</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Jira Fix Version</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Amount foreign currency</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Transaction Currency</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Amount Subsidiary currency</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Subsidiary Currency</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Amount in CAD</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Account</Data></Cell>' +
+            '<Cell><Data ss:Type="String">Account Type</Data></Cell>' +
+            '</Row>';
+
+            for (var key in finalObject) {
+                if(!context.zerovalues){
+                    var hasvalues = false;
+                    for(var subkey in finalObject[key]){
+                        var temp2_totalSubs = 0;
+                        // if(subkey == '- Unassigned -'){
+                        //     var hasvalues = true;
+                        // }
+                        finalObject[key][subkey].forEach(function(element){
+                            temp2_totalSubs += parseFloat(element.subsidiaryamount);
+                        });
+                        if(temp2_totalSubs.toFixed(2) != '0.00' && temp2_totalSubs.toFixed(2) != '-0.00'){
+                            hasvalues = true;
+                        }
+                    }
+                    if(!hasvalues){
+                        continue;
+                    }
+                }
+                var substemp_totalUSD = 0,
+                substemp_totalCAD = 0,
+                substemp_totalSubs = 0;
+                xmlString += '<Row>' +
+                '<Cell ss:StyleID="sBold"><Data ss:Type="String">' + key + '</Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '</Row>';
+                finalResult.push({
+                    projectid: key,
+                    subsidiary: '',
+                    customer: '',
+                    documenttype: '',
+                    documentnumber: '',
+                    date: '',
+                    memo: '',
+                    sow: '',
+                    internalid: '',
+                    salesforcekey: '',
+                    jiraprojectkey: '',
+                    jirafixversion: '',
+                    salesinforeigncurrency: '',
+                    transactioncurrency: '',
+                    salesinsubsidiarycurrency: '',
+                    subsidiarycurrency: '',
+                    amountincad: '',
+                    account: ''
+                });
+                for(var subkey in finalObject[key]){
+                    if(!context.zerovalues){
+                        var hasvalues = false,
+                        temp2_totalSubs = 0;
+                        // if(subkey == '- Unassigned -'){
+                        //     var hasvalues = true;
+                        // }
+                        finalObject[key][subkey].forEach(function(element){
+                            temp2_totalSubs += parseFloat(element.subsidiaryamount);
+                        });
+                        if(temp2_totalSubs.toFixed(2) != '0.00' && temp2_totalSubs.toFixed(2) != '-0.00'){
+                            hasvalues = true;
+                        }
+                        if(!hasvalues){
+                            continue;
+                        }
+                    }
+                    var temp_totalUSD = 0,
+                    temp_totalCAD = 0,
+                    temp_totalSubs = 0;
+                    xmlString += '<Row>' +
+                    '<Cell ss:StyleID="sBold"><Data ss:Type="String">   ' + subkey + '</Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '</Row>';
+                    finalResult.push({
+                        projectid: '    ' + subkey,
+                        subsidiary: '',
+                        customer: '',
+                        documenttype: '',
+                        documentnumber: '',
+                        date: '',
+                        memo: '',
+                        sow: '',
+                        internalid: '',
+                        salesforcekey: '',
+                        jiraprojectkey: '',
+                        jirafixversion: '',
+                        salesinforeigncurrency: '',
+                        transactioncurrency: '',
+                        salesinsubsidiarycurrency: '',
+                        subsidiarycurrency: '',
+                        amountincad: '',
+                        account: ''
+                    });
+                    finalObject[key][subkey].forEach(function(element){
+                        var customerid, itemcustomer;
+                        if(element.getValue({name: 'customer', join: 'job'})){
+                            customerid = element.getValue({name: 'customer', join: 'job'});
+                        }else if(element.getValue({name: 'internalid', join: 'customermain'})){
+                            customerid = element.getValue({name: 'internalid', join: 'customermain'});
+                        };
+                        if(customerid){
+                            itemcustomer = customers[customerid];
+                        }
+                        var netsuiteid = element.getValue({name: 'entityid', join: 'job'}).split(':');
+                        netsuiteid = netsuiteid[netsuiteid.length - 1].trim();
+                        var inputtype = element.getValue({name: 'custbody_osf_deferredrevenue'}) ? 'Deferred Revenue': undefined;
+                        if(!inputtype){
+                            inputtype = element.getText({name: 'custcol_osf_inputtype'});
+                        }
+                        if(!inputtype){
+                            inputtype = 'Sales';
+                        }
+                        xmlString += '<Row>' +
+                        '<Cell><Data ss:Type="String">      ' + subkey + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'subsidiary'}).split(':').slice(-1)[0].trim() + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'internalid', join: 'job'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + (itemcustomer ? itemcustomer.getValue({name: 'entityid'}) : '') + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'type'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'tranid'}) + '</Data></Cell>' +
+                        formatExcelDate(element.getValue({name: 'trandate'})) +
+                        //'<Cell><Data ss:Type="String">' + element.getValue({name: 'memo'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + (ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})] ? ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})].getValue({name: 'memo'}) : element.getValue({name: 'memo'})) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + inputtype + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'custentity_osf_jp_sow', join: 'job'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'custentity_osf_jp_salesforce_key', join: 'job'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'custentity_osf_jp_jira_project_key', join: 'job'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'custentity_osf_jp_jira_fix_version', join: 'job'}) + '</Data></Cell>' +
+                        '<Cell ss:StyleID="sNumber"><Data ss:Type="Number">' + element.actualAmount + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'currency'}) + '</Data></Cell>' +
+                        '<Cell ss:StyleID="sNumber"><Data ss:Type="Number">' + element.subsidiaryamount + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'currency', join: 'subsidiary'}) + '</Data></Cell>' +
+                        '<Cell ss:StyleID="sNumber"><Data ss:Type="Number">' + element.consolidatedCADAmount + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getValue({name: 'name', join: 'account'}) + '</Data></Cell>' +
+                        '<Cell><Data ss:Type="String">' + element.getText({name: 'type', join: 'account'}) + '</Data></Cell>' +
+                        '</Row>';
+                        
+                        finalResult.push({
+                            projectid: '        ' + subkey,
+                            subsidiary: element.getText({name: 'subsidiary'}).split(':').slice(-1)[0].trim(),
+                            customer: (itemcustomer ? itemcustomer.getValue({name: 'entityid'}) : ''),
+                            documenttype: element.getText({name: 'type'}),
+                            documentnumber: element.getValue({name: 'tranid'}),
+                            date: element.getValue({name: 'trandate'}),
+                            memo: (ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})] ? ITEMSmain[element.getValue({name: 'tranid'}) + '-' + element.getValue({name: 'type'})].getValue({name: 'memo'}) : element.getValue({name: 'memo'})),
+                            sow: element.getValue({name: 'custentity_osf_jp_sow', join: 'job'}),
+                            internalid: element.getValue({name: 'internalid'}),
+                            salesforcekey: element.getValue({name: 'custentity_osf_jp_salesforce_key', join: 'job'}),
+                            jiraprojectkey: element.getValue({name: 'custentity_osf_jp_jira_project_key', join: 'job'}),
+                            jirafixversion: element.getValue({name: 'custentity_osf_jp_jira_fix_version', join: 'job'}),
+                            salesinforeigncurrency: element.actualAmount,
+                            transactioncurrency: element.getText({name: 'currency'}),
+                            salesinsubsidiarycurrency: element.subsidiaryamount,
+                            subsidiarycurrency: element.getText({name: 'currency', join: 'subsidiary'}),
+                            amountincad: element.consolidatedCADAmount,
+                            account: element.getValue({name: 'name', join: 'account'})
+                        });
+
+                        substemp_totalUSD += parseFloat(element.consolidatedUSDAmount);
+                        substemp_totalCAD += parseFloat(element.consolidatedCADAmount);
+                        substemp_totalSubs += parseFloat(element.subsidiaryamount);
+
+                        temp_totalUSD += parseFloat(element.consolidatedUSDAmount);
+                        temp_totalCAD += parseFloat(element.consolidatedCADAmount);
+                        temp_totalSubs += parseFloat(element.subsidiaryamount);
+        
+                        totalUSD += parseFloat(element.consolidatedUSDAmount);
+                        totalCAD += parseFloat(element.consolidatedCADAmount);
+                        totalSubs += parseFloat(element.subsidiaryamount);
+                    });
+                    xmlString += '<Row>' +
+                    '<Cell ss:StyleID="sBold"><Data ss:Type="String">   Total ' + subkey + '</Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell ss:StyleID="sNumberBold"><Data ss:Type="Number">' + temp_totalSubs.toFixed(2) + '</Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '<Cell ss:StyleID="sNumberBold"><Data ss:Type="Number">' + temp_totalCAD.toFixed(2) + '</Data></Cell>' +
+                    '<Cell><Data ss:Type="String"></Data></Cell>' +
+                    '</Row>';
+                    finalResult.push({
+                        projectid: '    Total ' + subkey,
+                        subsidiary: '',
+                        customer: '',
+                        documenttype: '',
+                        documentnumber: '',
+                        date: '',
+                        memo: '',
+                        sow: '',
+                        internalid: '',
+                        salesforcekey: '',
+                        jiraprojectkey: '',
+                        jirafixversion: '',
+                        salesinforeigncurrency: '',
+                        transactioncurrency: '',
+                        salesinsubsidiarycurrency: temp_totalSubs.toFixed(2),
+                        subsidiarycurrency: '',
+                        amountincad: temp_totalCAD.toFixed(2),
+                        account: ''
+                    });
+                }
+                xmlString += '<Row>' +
+                '<Cell ss:StyleID="sBold"><Data ss:Type="String">Total ' + key + '</Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell ss:StyleID="sNumberBold"><Data ss:Type="Number">' + substemp_totalSubs.toFixed(2) + '</Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '<Cell ss:StyleID="sNumberBold"><Data ss:Type="Number">' + substemp_totalCAD.toFixed(2) + '</Data></Cell>' +
+                '<Cell><Data ss:Type="String"></Data></Cell>' +
+                '</Row>';
+                finalResult.push({
+                    projectid: 'Total ' + key,
+                    subsidiary: '',
+                    customer: '',
+                    documenttype: '',
+                    documentnumber: '',
+                    date: '',
+                    memo: '',
+                    sow: '',
+                    internalid: '',
+                    salesforcekey: '',
+                    jiraprojectkey: '',
+                    jirafixversion: '',
+                    salesinforeigncurrency: '',
+                    transactioncurrency: '',
+                    salesinsubsidiarycurrency: substemp_totalSubs.toFixed(2),
+                    subsidiarycurrency: '',
+                    amountincad: '',
+                    account: ''
+                });
+            }
+        
+
+            xmlString += '</Table></Worksheet></Workbook>';
+
+            var strXmlEncoded = Nencode.convert({
+                string : xmlString,
+                inputEncoding : Nencode.Encoding.UTF_8,
+                outputEncoding : Nencode.Encoding.BASE_64
+            });
+            xlsFile = Nfile.create({
+                name: 'DeferredRevenue' + context.dateTime + '.xls',
+                contents: strXmlEncoded,
+                fileType: Nfile.Type.EXCEL,
+                folder: 134376
+            });
+            var fileId = xlsFile.save();
+
+            xlsFile = Nfile.load({
+                id: fileId
+            });
+        }
+
+        return {
+            post : _post
+        }
+    }
+);
